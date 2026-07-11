@@ -115,11 +115,14 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # ── Lazy imports (avoid circular imports at module level) ─────────────────────
 from app.models.page import PageData
 from app.models.project import ProjectConfig
-from app.ui.components.sidebar import render_sidebar
+from app.ui.components.sidebar import SITE_SUMMARY_ID, render_sidebar
 from app.ui.pages.setup import render_setup_page
 from app.ui.pages.overview import render_overview_page
 from app.ui.pages.canvas_page import render_canvas_page
 from app.ui.pages.details import render_details_page
+from app.ui.components.consolidated_report import render_consolidated_action_plan
+from app.exports.report_data import is_kontakt_url
+from app.ui.app_state import get_export_lang, init_app_state, reset_export_lang
 
 
 # ── Session state initialisation ──────────────────────────────────────────────
@@ -280,6 +283,7 @@ def main() -> None:
     _init_state()
 
     project: ProjectConfig | None = st.session_state["project"]
+    init_app_state(project)
     pages: list[PageData] = st.session_state["pages"]
     selected_url: str | None = st.session_state["selected_url"]
 
@@ -315,11 +319,27 @@ def main() -> None:
         config = render_setup_page()
         if config:
             st.session_state["project"] = config
+            reset_export_lang(config)
             st.session_state["analysis_running"] = True
             st.rerun()
 
     elif st.session_state["view"] == "analysis":
-        # ── Page tabs ──────────────────────────────────────────────────────
+        # ── Site Summary (left sidebar) ───────────────────────────────────
+        if st.session_state.get("selected_url") == SITE_SUMMARY_ID:
+            if st.session_state.get("show_competitor_intel"):
+                _render_competitor_dashboard(project, pages, competitor_sources)
+                if st.button("← Back to Summary", key="comp_intel_back_summary"):
+                    st.session_state["show_competitor_intel"] = False
+                    st.rerun()
+                return
+
+            _render_site_summary_view(project, pages)
+            if st.session_state.get("trigger_export"):
+                st.session_state["trigger_export"] = False
+                _trigger_export(project, pages, cfg)
+            return
+
+        # ── Per-page analysis ─────────────────────────────────────────────
         current_url = st.session_state.get("selected_url")
         current_page: PageData | None = next(
             (p for p in pages if p.url == current_url), None
@@ -392,10 +412,58 @@ def main() -> None:
         with tab_recs:
             _render_recommendations_tab(current_page, project)
 
+        # ── Kontakt: English site-wide summary (matches PDF action plan) ──
+        if is_kontakt_url(current_page.url):
+            st.markdown("---")
+            render_consolidated_action_plan(
+                project,
+                pages,
+                lang="en",
+                variant="kontakt",
+                expanded=True,
+            )
+
         # ── Export trigger ────────────────────────────────────────────────
         if st.session_state.get("trigger_export"):
             st.session_state["trigger_export"] = False
             _trigger_export(project, pages, cfg)
+
+
+def _render_site_summary_view(project: ProjectConfig, pages: list[PageData]) -> None:
+    """Left-sidebar Summary — site-wide action plan (English, matches PDF export)."""
+    from app.exports.report_data import collect_consolidated_issues, tier_counts
+    from app.ui.components.consolidated_report import render_consolidated_action_plan
+
+    analysed = [p for p in pages if p.extraction_complete]
+    scores = [int(p.scores.total) for p in analysed]
+    avg = sum(scores) // len(scores) if scores else 0
+
+    issues = collect_consolidated_issues(analysed, project, lang="en")
+    counts = tier_counts(issues)
+    critical = sum(1 for i in issues if i.priority == "critical")
+    warnings = sum(1 for i in issues if i.priority == "warning")
+
+    st.markdown("## 📋 Site Summary")
+    st.caption(
+        f"Extended report for **{project.business_name}** — all pages combined. "
+        "Same data as the final section of the PDF export."
+    )
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Site score", f"{avg}/100")
+    m2.metric("Pages", len(analysed))
+    m3.metric("Critical", critical)
+    m4.metric("Warnings", warnings)
+    m5.metric("Fix packages", f"{counts.get('Basic', 0)} / {counts.get('Advanced', 0)} / {counts.get('All', 0)}")
+
+    st.markdown("---")
+    render_consolidated_action_plan(
+        project,
+        pages,
+        lang="en",
+        variant="default",
+        expanded=True,
+    )
 
 
 def _render_competitor_dashboard(
@@ -582,17 +650,45 @@ def _trigger_export(project: ProjectConfig, pages: list[PageData], cfg: Settings
 
     with st.spinner(f"Building report for {len(analysed)} page(s)…"):
         try:
-            pdf_bytes = generate_pdf_report(project, analysed)
+            report_lang = get_export_lang(project)
+
             safe_name = project.business_name.replace(" ", "_")
             from datetime import datetime
             date_tag = datetime.now().strftime("%Y%m%d")
+
+            cache_key = f"{len(analysed)}_{date_tag}_{project.website_url}"
+            pdf_cache: dict[str, bytes] = st.session_state.get("export_pdf_cache", {})
+            if st.session_state.get("export_cache_key") != cache_key or not pdf_cache:
+                pdf_cache = {
+                    "en": generate_pdf_report(project, analysed, lang="en"),
+                    "de": generate_pdf_report(project, analysed, lang="de"),
+                }
+                st.session_state["export_pdf_cache"] = pdf_cache
+                st.session_state["export_cache_key"] = cache_key
+
             st.success(f"Report ready — {len(analysed)} pages included.")
-            st.download_button(
-                label="⬇️ Download Full Site Report (PDF)",
-                data=pdf_bytes,
-                file_name=f"SEO_Audit_{safe_name}_{date_tag}.pdf",
-                mime="application/pdf",
+            st.caption(
+                "Download in your preferred language. The final section lists all "
+                "errors and warnings with competitor matches and fix packages "
+                "(Basic · Advanced · Full Campaign)."
             )
+
+            dl_cols = st.columns(2)
+            for col, lang, label in (
+                (dl_cols[0], "en", "🇬🇧 Download English PDF"),
+                (dl_cols[1], "de", "🇩🇪 Download German PDF"),
+            ):
+                with col:
+                    lang_tag = lang.upper()
+                    st.download_button(
+                        label=label,
+                        data=pdf_cache[lang],
+                        file_name=f"SEO_Audit_{safe_name}_{date_tag}_{lang_tag}.pdf",
+                        mime="application/pdf",
+                        key=f"download_pdf_{lang}",
+                        use_container_width=True,
+                        type="primary" if lang == report_lang else "secondary",
+                    )
         except Exception as exc:
             st.error(f"Export failed: {exc}")
 

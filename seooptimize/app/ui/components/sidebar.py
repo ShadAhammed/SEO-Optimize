@@ -8,6 +8,10 @@ import streamlit as st
 
 from app.models.page import PageData, ScoreStatus
 from app.models.project import ProjectConfig
+from app.ui.app_state import render_export_lang_selector, reset_export_lang
+
+# Sentinel value for left-sidebar "Summary" navigation (not a real URL).
+SITE_SUMMARY_ID = "__site_summary__"
 
 
 def _score_color(score: int) -> str:
@@ -62,6 +66,7 @@ def render_sidebar(
         )
 
         clicked_url: str | None = None
+        summary_selected = selected_url == SITE_SUMMARY_ID
 
         if not pages:
             st.markdown(
@@ -70,23 +75,37 @@ def render_sidebar(
                 unsafe_allow_html=True,
             )
         else:
+            analysed_count = sum(1 for p in pages if p.extraction_complete)
+            if st.button(
+                "📋 Summary",
+                key="nav_site_summary",
+                use_container_width=True,
+                type="primary" if summary_selected else "secondary",
+                disabled=analysed_count == 0,
+                help="Site-wide action plan — all errors, warnings, competitor matches, fix packages",
+            ):
+                clicked_url = SITE_SUMMARY_ID
+
+            st.markdown(
+                "<p style='color:#64748B;font-size:0.6rem;font-weight:600;"
+                "letter-spacing:0.06em;text-transform:uppercase;margin:8px 0 4px;'>"
+                "Pages</p>",
+                unsafe_allow_html=True,
+            )
+
             for page in pages:
                 score = int(page.scores.total)
                 color = _score_color(score)
                 label = _page_label(page)
-                is_selected = page.url == selected_url
+                is_selected = page.url == selected_url and not summary_selected
 
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    btn_style = (
-                        "background:#1E3A8A;border-color:#3B82F6;"
-                        if is_selected
-                        else ""
-                    )
                     if st.button(
                         label,
                         key=f"nav_{page.url}",
                         use_container_width=True,
+                        type="primary" if is_selected else "secondary",
                     ):
                         clicked_url = page.url
                 with col2:
@@ -121,8 +140,16 @@ def render_sidebar(
             _render_competitor_panel(project, pages, competitor_sources or [])
             st.divider()
 
-        # ── Export button ─────────────────────────────────────────────────
+        # ── Export ─────────────────────────────────────────────────
         if pages and any(p.ai_complete for p in pages):
+            st.markdown(
+                "<p style='color:#64748B;font-size:0.65rem;font-weight:700;"
+                "letter-spacing:0.08em;text-transform:uppercase;margin:0 0 4px;'>"
+                "Report Language</p>",
+                unsafe_allow_html=True,
+            )
+            render_export_lang_selector(project)
+
             if st.button("📄 Export Report", use_container_width=True, type="primary"):
                 st.session_state["trigger_export"] = True
 
@@ -133,6 +160,8 @@ def render_sidebar(
             st.session_state["pages"] = []
             st.session_state["selected_url"] = None
             st.session_state["show_competitor_intel"] = False
+            st.session_state.pop("export_pdf_cache", None)
+            reset_export_lang(None)
             st.rerun()
 
     return clicked_url
