@@ -18,8 +18,8 @@ dist/
 venv/
 env/
 
-# Cache (runtime data — excluded from VCS)
-cache/
+# Runtime cache data only (not app/cache Python module)
+/cache/
 
 # IDE
 .idea/
