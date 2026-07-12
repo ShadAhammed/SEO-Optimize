@@ -69,7 +69,7 @@ def _has_anthropic_key(cfg: Settings) -> bool:
 def _competitor_cache_file(cfg: Settings, competitor_urls: list[str]) -> Path:
     """Return competitor cache file path for the configured URL set."""
     key = hashlib.sha256(
-        json.dumps(sorted(competitor_urls[:5]), ensure_ascii=False).encode()
+        json.dumps(sorted(competitor_urls[:8]), ensure_ascii=False).encode()
     ).hexdigest()[:16]
     return cfg.cache_path / "competitors" / f"{key}.json"
 

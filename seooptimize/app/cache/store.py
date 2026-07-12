@@ -266,7 +266,7 @@ class CacheStore:
         cache_file = self._competitors_path(competitor_urls)
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "competitor_urls": competitor_urls[:5],
+            "competitor_urls": competitor_urls[:8],
             "sources": sources,
             "timestamp": datetime.utcnow().isoformat(),
         }
@@ -337,7 +337,7 @@ class CacheStore:
     def _competitors_path(self, competitor_urls: list[str]) -> Path:
         """Return the cache file for a competitor URL set."""
         key = sha256_of_string(
-            json.dumps(sorted(competitor_urls[:5]), ensure_ascii=False)
+            json.dumps(sorted(competitor_urls[:8]), ensure_ascii=False)
         )[:16]
         return self._dir / "competitors" / f"{key}.json"
 

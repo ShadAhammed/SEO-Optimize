@@ -95,10 +95,28 @@ def _settings_has_anthropic(settings: Settings) -> bool:
 
 
 def _settings_has_google(settings: Settings) -> bool:
+    """Legacy helper — delegates to Gemini check."""
+    return _settings_has_gemini(settings)
+
+
+def _settings_has_gemini(settings: Settings) -> bool:
     try:
-        return bool(settings.has_google_key)
+        return bool(settings.has_gemini_key)
     except AttributeError:
-        return bool(getattr(settings, "google_api_key", "").strip())
+        return (
+            bool(getattr(settings, "gemini_api_key", "").strip())
+            or bool(getattr(settings, "google_api_key", "").strip())
+        )
+
+
+def _get_effective_gemini_key(settings: Settings) -> str:
+    try:
+        return settings.effective_gemini_key
+    except AttributeError:
+        return (
+            getattr(settings, "gemini_api_key", "").strip()
+            or getattr(settings, "google_api_key", "").strip()
+        )
 
 
 class AnalysisService:
@@ -118,7 +136,7 @@ class AnalysisService:
     def _competitor_cache_file(self, competitor_urls: list[str]) -> Path:
         """Return competitor cache file path independent of CacheStore methods."""
         key = hashlib.sha256(
-            json.dumps(sorted(competitor_urls[:5]), ensure_ascii=False).encode()
+            json.dumps(sorted(competitor_urls[:8]), ensure_ascii=False).encode()
         ).hexdigest()[:16]
         return self._settings.cache_path / "competitors" / f"{key}.json"
 
@@ -146,7 +164,7 @@ class AnalysisService:
         cache_file = self._competitor_cache_file(competitor_urls)
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "competitor_urls": competitor_urls[:5],
+            "competitor_urls": competitor_urls[:8],
             "sources": sources,
             "timestamp": datetime.utcnow().isoformat(),
         }
@@ -288,7 +306,7 @@ class AnalysisService:
         force: bool = False,
     ) -> list[dict[str, Any]]:
         """Render competitor URLs through the same RenderingEngine as client pages."""
-        competitor_urls = self._project.competitor_urls[:5]
+        competitor_urls = self._project.competitor_urls[:8]
         if not competitor_urls:
             logger.info("Competitor rendering skipped: no competitor URLs configured")
             return []
@@ -361,12 +379,13 @@ class AnalysisService:
             logger.info("[%.0f%%] %s", pct * 100, msg)
 
         logger.info(
-            "Lazy AI requested: url=%s ai_complete=%s force=%s anthropic=%s deepseek=%s competitors=%d",
+            "Lazy AI requested: url=%s ai_complete=%s force=%s anthropic=%s deepseek=%s gemini=%s competitors=%d",
             page.url,
             page.ai_complete,
             force,
             _settings_has_anthropic(self._settings),
             _settings_has_deepseek(self._settings),
+            _settings_has_gemini(self._settings),
             len(self._project.competitor_urls or []),
         )
 
@@ -385,35 +404,43 @@ class AnalysisService:
             self._settings.ai_max_retries,
         )
 
-        # Reviewer AI: prefer DeepSeek, fall back to Gemini if only Google key present
-        gemini: DeepSeekProvider | GeminiProvider | None = None
-        reviewer_name = "none"
+        # Load all available reviewer AIs — both DeepSeek and Gemini run in parallel
+        deepseek_reviewer: Any = None
+        gemini_reviewer: GeminiProvider | None = None
+        active_reviewer_names: list[str] = []
+
         if _settings_has_deepseek(self._settings):
             try:
                 from app.ai.deepseek import DeepSeekProvider
-            except ImportError as exc:
-                logger.error(
-                    "DeepSeek requires the openai package. Run: pip install openai — %s",
-                    exc,
-                )
-                DeepSeekProvider = None  # type: ignore[misc, assignment]
-            if DeepSeekProvider is not None:
-                gemini = DeepSeekProvider(
+                deepseek_reviewer = DeepSeekProvider(
                     self._settings.deepseek_api_key,
                     self._settings.deepseek_model,
                     self._settings.ai_max_retries,
                 )
-                reviewer_name = "DeepSeek"
+                active_reviewer_names.append("DeepSeek")
                 logger.info("Reviewer AI: DeepSeek (%s)", self._settings.deepseek_model)
-        elif _settings_has_google(self._settings):
-            gemini = GeminiProvider(
-                self._settings.google_api_key,
-                self._settings.gemini_model,
-                self._settings.ai_max_retries,
-            )
-            reviewer_name = "Gemini"
-            logger.info("Reviewer AI: Gemini (%s)", self._settings.gemini_model)
-        else:
+            except ImportError as exc:
+                logger.error(
+                    "DeepSeek requires the openai package. Run: pip install openai — %s", exc
+                )
+
+        if _settings_has_gemini(self._settings):
+            try:
+                gemini_reviewer = GeminiProvider(
+                    _get_effective_gemini_key(self._settings),
+                    self._settings.gemini_model,
+                    self._settings.ai_max_retries,
+                )
+                active_reviewer_names.append("Gemini")
+                logger.info("Reviewer AI: Gemini (%s)", self._settings.gemini_model)
+            except Exception as exc:
+                logger.error("Gemini reviewer init failed: %s", exc)
+
+        reviewer_name = " + ".join(active_reviewer_names) if active_reviewer_names else "none"
+        # Legacy variable used by cache invalidation logic (any reviewer = non-none)
+        gemini = deepseek_reviewer or gemini_reviewer
+
+        if not active_reviewer_names:
             logger.warning("No reviewer AI configured — running Claude only")
 
         if not page.extraction_complete:
@@ -475,17 +502,17 @@ class AnalysisService:
             ).encode()
         ).hexdigest()[:16]
 
-        # Invalidate section cache when reviewer AI config changes (e.g. DeepSeek added).
+        # Invalidate section cache when reviewer AI config changes.
+        # Encode all active reviewers so adding Gemini to an existing DeepSeek session refreshes.
+        reviewer_version_parts = []
         if _settings_has_deepseek(self._settings):
-            reviewer_version = hashlib.sha256(
-                f"deepseek:{self._settings.deepseek_model}".encode()
-            ).hexdigest()[:16]
-        elif _settings_has_google(self._settings):
-            reviewer_version = hashlib.sha256(
-                f"gemini:{self._settings.gemini_model}".encode()
-            ).hexdigest()[:16]
-        else:
-            reviewer_version = "none"
+            reviewer_version_parts.append(f"deepseek:{self._settings.deepseek_model}")
+        if _settings_has_gemini(self._settings):
+            reviewer_version_parts.append(f"gemini:{self._settings.gemini_model}")
+        reviewer_version = (
+            hashlib.sha256("|".join(reviewer_version_parts).encode()).hexdigest()[:16]
+            if reviewer_version_parts else "none"
+        )
 
         progress(f"Preparing section AI: {page.url}", 0.05)
         section_results: dict[str, dict[str, Any]] = {}
@@ -564,8 +591,7 @@ class AnalysisService:
             progress(f"AI analysis: {section_id}", pct)
             section_hash = self._cache.section_hash(payload)
 
-            # Claude receives section issues PLUS any competitor gaps so it can
-            # produce competitor-referenced recommendations without a second AI.
+            # ── Step 1: Claude primary analysis ──────────────────────────────
             claude_prompt = build_claude_prompt(
                 business_name=self._project.business_name,
                 business_category=self._project.business_category.value,
@@ -596,16 +622,13 @@ class AnalysisService:
                 len(claude_result.annotations),
             )
 
-            gemini_result = None
-            if gemini and claude_result.annotations:
+            # ── Step 2: Both reviewers run in parallel ────────────────────────
+            # Pipeline: Claude → DeepSeek reviews → Gemini reviews → Claude validates additions
+            import asyncio as _asyncio
+
+            combined_gemini_result = None
+            if claude_result.annotations and (deepseek_reviewer or gemini_reviewer):
                 reviewer_attempted = True
-                logger.info(
-                    "Sending %d Claude annotations to %s for review: page=%s section=%s",
-                    len(claude_result.annotations),
-                    reviewer_name,
-                    page.url,
-                    section_id,
-                )
                 gemini_prompt = build_gemini_prompt(
                     business_name=self._project.business_name,
                     city=self._project.target_city,
@@ -617,38 +640,85 @@ class AnalysisService:
                     structured_data=payload,
                     section_id=section_id,
                 )
+
+                deepseek_task = (
+                    deepseek_reviewer.review(gemini_prompt)
+                    if deepseek_reviewer else None
+                )
+                gemini_task = (
+                    gemini_reviewer.review(gemini_prompt)
+                    if gemini_reviewer else None
+                )
+
+                tasks = [t for t in [deepseek_task, gemini_task] if t is not None]
+                task_names = (
+                    (["DeepSeek"] if deepseek_task else [])
+                    + (["Gemini"] if gemini_task else [])
+                )
+
                 try:
-                    gemini_result = await gemini.review(gemini_prompt)
+                    results = await _asyncio.gather(*tasks, return_exceptions=True)
                 except Exception as exc:
-                    reviewer_errors.append(f"{section_id}: {exc}")
-                    logger.error(
-                        "%s review failed: page=%s section=%s error=%s",
-                        reviewer_name,
-                        page.url,
-                        section_id,
-                        exc,
+                    logger.error("Reviewer gather failed: %s", exc)
+                    results = [exc] * len(tasks)
+
+                deepseek_out = None
+                gemini_out = None
+                for name, result in zip(task_names, results):
+                    if isinstance(result, Exception):
+                        reviewer_errors.append(f"{section_id}/{name}: {result}")
+                        logger.error(
+                            "%s review failed: page=%s section=%s error=%s",
+                            name, page.url, section_id, result,
+                        )
+                    else:
+                        logger.info(
+                            "%s review complete: reviews=%d additional=%d",
+                            name, len(result.reviews), len(result.additional_annotations),
+                        )
+                        if name == "DeepSeek":
+                            deepseek_out = result
+                        else:
+                            gemini_out = result
+
+                # ── Step 3: Merge reviewer outputs ────────────────────────────
+                combined_gemini_result = _merge_reviewer_results(deepseek_out, gemini_out)
+
+                # ── Step 4: Validate reviewer-only additions with Claude ───────
+                if combined_gemini_result.additional_annotations:
+                    ann_dicts = [
+                        a.model_dump() for a in combined_gemini_result.additional_annotations
+                    ]
+                    orig_dicts = [a.model_dump() for a in claude_result.annotations]
+                    try:
+                        validated_flags = await claude.validate_additions(
+                            ann_dicts, orig_dicts,
+                            self._project.business_name, page.url,
+                        )
+                    except Exception as exc:
+                        logger.warning("Claude validation failed: %s — discarding all additions", exc)
+                        validated_flags = [False] * len(ann_dicts)
+
+                    # Only keep additions Claude confirmed
+                    kept = [
+                        ann for ann, ok in zip(
+                            combined_gemini_result.additional_annotations, validated_flags
+                        )
+                        if ok
+                    ]
+                    logger.info(
+                        "Claude validation: %d/%d reviewer additions accepted",
+                        len(kept), len(ann_dicts),
                     )
-                    gemini_result = None
-                review_count = len(gemini_result.reviews) if gemini_result else 0
-                logger.info(
-                    "%s review complete: page=%s section=%s reviews=%d additional=%d",
-                    reviewer_name,
-                    page.url,
-                    section_id,
-                    review_count,
-                    len(gemini_result.additional_annotations) if gemini_result else 0,
-                )
-            elif gemini and not claude_result.annotations:
-                logger.info(
-                    "%s review skipped: no Claude annotations for page=%s section=%s",
-                    reviewer_name,
-                    page.url,
-                    section_id,
-                )
+                    combined_gemini_result = combined_gemini_result.__class__(
+                        reviews=combined_gemini_result.reviews,
+                        additional_annotations=kept,
+                        raw_response=combined_gemini_result.raw_response,
+                    )
 
             ai_response = {
                 "claude": claude_result.model_dump(),
-                "gemini": gemini_result.model_dump() if gemini_result else {},
+                "gemini": combined_gemini_result.model_dump() if combined_gemini_result else {},
             }
             self._cache.update_section_ai(
                 url=page.url,
@@ -668,6 +738,7 @@ class AnalysisService:
             competitor_summary,
             reviewer_attempted=reviewer_attempted,
             reviewer_error="; ".join(reviewer_errors),
+            reviewer_name=reviewer_name,
         )
         progress("AI analysis complete!", 1.0)
 
@@ -679,6 +750,7 @@ class AnalysisService:
         competitor_summary: dict[str, Any] | None = None,
         reviewer_attempted: bool = False,
         reviewer_error: str = "",
+        reviewer_name: str = "",
     ) -> None:
         """Merge cached/new section AI outputs into the existing page format."""
         from app.models.annotations import ClaudeAnalysis, GeminiAnalysis
@@ -733,15 +805,104 @@ class AnalysisService:
             "reviewer_active": reviewer_active,
             "reviewer_attempted": reviewer_attempted,
             "reviewer_error": reviewer_error,
-            "reviewer_label": "DeepSeek" if _settings_has_deepseek(self._settings) else (
-                "Gemini" if _settings_has_google(self._settings) else ""
-            ),
+            "reviewer_label": reviewer_name if reviewer_name not in ("", "none") else "",
         }
         page.ai_complete = True
         self._cache.update_ai_for_url(page.url, page.ai_analysis)
 
         if claude_result.page_score > 0 and competitor_data:
             page.scores.competitor_gap = min(5.0, competitor_data.__len__() * 0.5)
+
+
+def _merge_reviewer_results(
+    deepseek: Any | None,
+    gemini: Any | None,
+) -> Any:
+    """Combine DeepSeek and Gemini review outputs into one merged GeminiAnalysis.
+
+    Merge rules (per selector):
+    - Both agree    → keep, confidence boost
+    - One agrees, one absent → keep (single reviewer)
+    - Both reject   → downgrade or discard (confidence penalty)
+    - One agrees, one rejects → keep at lower confidence (Claude will be the tiebreaker)
+
+    Additional annotations: union, deduplicated by selector.
+    Raw response: concatenated for debugging.
+    """
+    from app.models.annotations import GeminiAnalysis, GeminiReview, GeminiVerdict
+
+    if deepseek is None and gemini is None:
+        return GeminiAnalysis()
+    if deepseek is None:
+        return gemini
+    if gemini is None:
+        return deepseek
+
+    # Merge reviews by selector
+    ds_by_sel: dict[str, Any] = {r.selector: r for r in deepseek.reviews}
+    gm_by_sel: dict[str, Any] = {r.selector: r for r in gemini.reviews}
+    merged_reviews: list[GeminiReview] = []
+
+    all_selectors = set(ds_by_sel) | set(gm_by_sel)
+    for sel in all_selectors:
+        ds_r = ds_by_sel.get(sel)
+        gm_r = gm_by_sel.get(sel)
+
+        if ds_r and gm_r:
+            # Both reviewed this finding — combine
+            ds_verdict = ds_r.gemini_verdict
+            gm_verdict = gm_r.gemini_verdict
+
+            if ds_verdict == GeminiVerdict.REJECT and gm_verdict == GeminiVerdict.REJECT:
+                # Both reject → propagate reject (Claude may downgrade it)
+                final_verdict = GeminiVerdict.REJECT
+            elif ds_verdict == GeminiVerdict.STRENGTHEN or gm_verdict == GeminiVerdict.STRENGTHEN:
+                final_verdict = GeminiVerdict.STRENGTHEN
+            elif ds_verdict == GeminiVerdict.AGREE or gm_verdict == GeminiVerdict.AGREE:
+                final_verdict = GeminiVerdict.AGREE
+            else:
+                final_verdict = ds_verdict
+
+            # Merge competitor evidence (union)
+            comp_evidence = {**(gm_r.competitor_evidence or {}), **(ds_r.competitor_evidence or {})}
+
+            note_parts = []
+            if ds_r.gemini_note:
+                note_parts.append(f"DeepSeek: {ds_r.gemini_note}")
+            if gm_r.gemini_note:
+                note_parts.append(f"Gemini: {gm_r.gemini_note}")
+
+            merged_reviews.append(
+                GeminiReview(
+                    selector=sel,
+                    gemini_verdict=final_verdict,
+                    gemini_note=" | ".join(note_parts),
+                    competitor_evidence=comp_evidence,
+                    revised_suggestion=ds_r.revised_suggestion or gm_r.revised_suggestion,
+                )
+            )
+        elif ds_r:
+            merged_reviews.append(ds_r)
+        else:
+            merged_reviews.append(gm_r)  # type: ignore[arg-type]
+
+    # Merge additional annotations — deduplicate by (selector, label)
+    seen: set[tuple[str, str]] = set()
+    merged_additional = []
+    for ann in (deepseek.additional_annotations or []) + (gemini.additional_annotations or []):
+        key = (ann.selector, ann.label)
+        if key not in seen:
+            seen.add(key)
+            merged_additional.append(ann)
+
+    raw = "\n---\n".join(
+        filter(None, [deepseek.raw_response or "", gemini.raw_response or ""])
+    )
+    return GeminiAnalysis(
+        reviews=merged_reviews,
+        additional_annotations=merged_additional,
+        raw_response=raw,
+    )
 
 
 def _extract_title(html: str) -> str:

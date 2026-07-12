@@ -49,7 +49,7 @@ class CompetitorIntelligence:
             List of competitor data dicts ready for the Gemini prompt.
         """
         if rendered_competitors:
-            expected = set(competitor_urls[:5])
+            expected = set(competitor_urls[:8])
             results = [
                 comp for comp in rendered_competitors
                 if comp.get("url") in expected
@@ -88,7 +88,7 @@ class CompetitorIntelligence:
             )
             page = await context.new_page()
 
-            for url in competitor_urls[:5]:
+            for url in competitor_urls[:8]:
                 try:
                     competitor_data = await self._extract_competitor(page, url)
                     if competitor_data:

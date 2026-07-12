@@ -75,6 +75,91 @@ class ClaudeProvider:
 
         return self._parse_response(raw_text)
 
+    @retry(
+        retry=retry_if_exception_type((anthropic.APITimeoutError, anthropic.RateLimitError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+    )
+    async def validate_additions(
+        self,
+        additional_annotations: list[dict[str, Any]],
+        original_annotations: list[dict[str, Any]],
+        business_name: str,
+        page_url: str,
+    ) -> list[bool]:
+        """Validate reviewer-only findings: return True for each that Claude confirms.
+
+        Called when DeepSeek or Gemini raises an issue that Claude did not flag.
+        Claude acts as gatekeeper — only validated findings enter the final report.
+
+        Args:
+            additional_annotations: New findings from a reviewer (DeepSeek / Gemini).
+            original_annotations: Claude's own annotations for this section.
+            business_name: Business context for the prompt.
+            page_url: URL being analysed.
+
+        Returns:
+            List of booleans, one per entry in additional_annotations.
+        """
+        if not additional_annotations:
+            return []
+
+        orig_labels = [a.get("label", "") for a in original_annotations]
+        findings_json = json.dumps(
+            [
+                {
+                    "index": i,
+                    "label": ann.get("label", ""),
+                    "issue": ann.get("issue", ""),
+                    "selector": ann.get("selector", ""),
+                    "priority": ann.get("priority", "warning"),
+                }
+                for i, ann in enumerate(additional_annotations)
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+
+        prompt = (
+            f"You are reviewing SEO findings for {business_name} ({page_url}).\n\n"
+            f"You already flagged these issues: {json.dumps(orig_labels, ensure_ascii=False)}\n\n"
+            f"An independent AI reviewer found these ADDITIONAL issues that you did NOT flag:\n"
+            f"{findings_json}\n\n"
+            f"For each finding, decide: is this a genuine, actionable SEO issue worth including?\n"
+            f"Respond with JSON only:\n"
+            f'{{ "validated": [true/false, ...] }}\n'
+            f"One boolean per finding, in the same order. true = include, false = discard."
+        )
+
+        logger.info(
+            "Claude validation request: page=%s additions=%d",
+            page_url,
+            len(additional_annotations),
+        )
+
+        message = await self._client.messages.create(
+            model=self._model,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        raw = message.content[0].text.strip()
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+
+        try:
+            data = json.loads(raw)
+            validated = data.get("validated", [])
+            result = [bool(v) for v in validated]
+            # Pad or truncate to match input length
+            while len(result) < len(additional_annotations):
+                result.append(False)
+            return result[: len(additional_annotations)]
+        except Exception as exc:
+            logger.warning("Claude validation parse failed: %s — defaulting all False", exc)
+            return [False] * len(additional_annotations)
+
     def analyse_sync(self, prompt: str) -> ClaudeAnalysis:
         """Synchronous wrapper for use outside async contexts."""
         import asyncio

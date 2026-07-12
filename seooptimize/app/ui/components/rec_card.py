@@ -22,20 +22,6 @@ def render_recommendation_card(card: RecommendationCard, index: int) -> None:
         "ok": "⚪ OK",
     }.get(card.priority.value, card.priority.value.upper())
 
-    # Agreement badge shown alongside confidence
-    agreement_badges = {
-        "full_agreement": ("🤝 Claude + DeepSeek agreed", "#D1FAE5", "#065F46"),
-        "strengthened": ("⬆️ DeepSeek upgraded severity", "#DBEAFE", "#1E40AF"),
-        "claude_only": ("🔵 Claude only", "#F1F5F9", "#475569"),
-        "gemini_only": ("⚡ DeepSeek only", "#EDE9FE", "#5B21B6"),
-        "disagreement": ("⚖️ AIs disagreed", "#FEF3C7", "#92400E"),
-        "partial": ("🔵 Claude + partial review", "#F1F5F9", "#475569"),
-    }
-    al = card.agreement_level or "claude_only"
-    badge_text, badge_bg, badge_fg = agreement_badges.get(
-        al, ("🔵 Claude only", "#F1F5F9", "#475569")
-    )
-
     with st.container():
         st.markdown(
             f"""
@@ -45,10 +31,6 @@ def render_recommendation_card(card: RecommendationCard, index: int) -> None:
                     <span style="background:{bg};color:{fg};padding:3px 10px;
                                  border-radius:9999px;font-weight:700;font-size:0.8rem;">
                         {priority_label}
-                    </span>
-                    <span style="background:{badge_bg};color:{badge_fg};padding:2px 8px;
-                                 border-radius:9999px;font-size:0.75rem;font-weight:600;">
-                        {badge_text}
                     </span>
                 </div>
                 <div style="font-size:0.75rem;color:#64748B;margin-bottom:0.75rem;">
@@ -91,12 +73,12 @@ def render_recommendation_card(card: RecommendationCard, index: int) -> None:
                         unsafe_allow_html=True,
                     )
 
-            # ── DeepSeek reviewer note ────────────────────────────────────
+            # ── Reviewer note (DeepSeek / Gemini) ────────────────────────
             if card.gemini_note:
                 st.markdown(
                     f"<div style='background:#EFF6FF;border-left:3px solid #3B82F6;"
                     f"padding:8px 12px;border-radius:4px;margin:8px 0;font-size:0.82rem;'>"
-                    f"<strong>DeepSeek note:</strong> {card.gemini_note}</div>",
+                    f"<strong>AI reviewer note:</strong> {card.gemini_note}</div>",
                     unsafe_allow_html=True,
                 )
 

@@ -61,8 +61,8 @@ class ProjectConfig(BaseModel):
     )
     competitor_urls: list[str] = Field(
         default_factory=list,
-        max_length=5,
-        description="Up to 5 competitor website URLs",
+        max_length=8,
+        description="Up to 8 competitor website URLs",
     )
     primary_keyword: str = Field(
         default="",

@@ -221,7 +221,7 @@ def _render_competitor_panel(
     )
 
     if not competitor_sources:
-        for url in project.competitor_urls[:5]:
+        for url in project.competitor_urls[:8]:
             domain = _up(url).netloc or url
             st.markdown(
                 f"<div style='font-size:0.74rem;color:#94A3B8;padding:1px 0;'>"
@@ -235,7 +235,7 @@ def _render_competitor_panel(
 
     # ── Per-competitor rows ───────────────────────────────────────────────────
     any_gap = False
-    for comp in competitor_sources[:5]:
+    for comp in competitor_sources[:8]:
         domain = comp.get("domain") or _up(comp.get("url", "")).netloc
         gaps = [
             f"{icon} {label}"

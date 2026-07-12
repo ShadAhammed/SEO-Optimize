@@ -27,6 +27,11 @@ class Settings(BaseSettings):
         description="DeepSeek API key",
         validation_alias=AliasChoices("DEEPSEEK_API_KEY", "DeepSeek_API_KEY", "deepseek_api_key"),
     )
+    gemini_api_key: str = Field(
+        default="",
+        description="Google Gemini API key",
+        validation_alias=AliasChoices("GEMINI_API_KEY", "Gemini_API_KEY"),
+    )
     # Legacy alias — kept so existing .env files with GOOGLE_API_KEY still work
     google_api_key: str = Field(default="", description="Google (Gemini) API key (legacy)")
 
@@ -117,23 +122,34 @@ class Settings(BaseSettings):
         return bool(self.deepseek_api_key.strip())
 
     @property
+    def has_gemini_key(self) -> bool:
+        """True when a Gemini API key is configured (prefers Gemini_API_KEY over legacy)."""
+        return bool(self.gemini_api_key.strip()) or bool(self.google_api_key.strip())
+
+    @property
+    def effective_gemini_key(self) -> str:
+        """Return the best available Gemini API key."""
+        return self.gemini_api_key.strip() or self.google_api_key.strip()
+
+    @property
     def has_google_key(self) -> bool:
         """Legacy: kept for any existing code that checks Gemini availability."""
-        return bool(self.google_api_key.strip())
+        return self.has_gemini_key
 
     @property
     def has_reviewer_key(self) -> bool:
         """True when any reviewer AI (DeepSeek or Gemini) is configured."""
-        return self.has_deepseek_key or self.has_google_key
+        return self.has_deepseek_key or self.has_gemini_key
 
     @property
     def reviewer_label(self) -> str:
-        """Human-readable name of the active reviewer AI."""
+        """Human-readable name of the active reviewer AI(s)."""
+        parts = []
         if self.has_deepseek_key:
-            return f"DeepSeek ({self.deepseek_model})"
-        if self.has_google_key:
-            return f"Gemini ({self.gemini_model})"
-        return "No reviewer configured"
+            parts.append(f"DeepSeek ({self.deepseek_model})")
+        if self.has_gemini_key:
+            parts.append(f"Gemini ({self.gemini_model})")
+        return " + ".join(parts) if parts else "No reviewer configured"
 
 
 # Module-level singleton — import and use directly.

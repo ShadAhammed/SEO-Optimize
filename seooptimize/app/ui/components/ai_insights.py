@@ -1,4 +1,4 @@
-"""Competitor gap and AI consensus panels for Overview / Recommendations."""
+"""Competitor comparison table and AI findings panel for Overview / Recommendations."""
 
 from __future__ import annotations
 
@@ -9,47 +9,80 @@ import streamlit as st
 from app.models.page import PageData
 from app.models.project import ProjectConfig
 
-_FEATURE_LABELS = {
-    "faq_section": "FAQ section",
-    "whatsapp": "WhatsApp contact button",
-    "reviews": "Review / rating signals",
-    "schema": "Structured data (Schema.org)",
-    "word_count": "Content depth (word count)",
-    "meta_description": "Meta description",
-    "h1": "H1 headline",
-    "content_structure": "Content structure (H2 sections)",
+_FEATURE_LABELS: dict[str, str] = {
+    "faq_section": "FAQ Section",
+    "whatsapp": "WhatsApp Button",
+    "reviews": "Review / Rating Signals",
+    "schema": "Structured Data (Schema)",
+    "word_count": "Content Depth (words)",
+    "meta_description": "Meta Description",
+    "h1": "H1 Headline",
+    "content_structure": "H2 Section Structure",
 }
 
-_VERDICT_LABELS = {
-    "agree": ("✅ Agrees", "#D1FAE5", "#065F46"),
-    "strengthen": ("⬆️ Upgraded severity", "#DBEAFE", "#1E40AF"),
-    "reject": ("❌ Disagrees", "#FEE2E2", "#991B1B"),
-    "add": ("➕ Adds finding", "#EDE9FE", "#5B21B6"),
+# Competitor feature keys that map to current_site boolean fields
+_FEATURE_TO_CURRENT: dict[str, tuple[str, str | None]] = {
+    # (current_site key, optional fallback)
+    "faq_section":       ("has_faq", None),
+    "whatsapp":          ("has_whatsapp", None),
+    "reviews":           ("has_reviews", None),
+    "schema":            ("schema_status", "pass"),
+    "content_structure": ("h2_count", None),
+    "word_count":        (None, None),
+    "meta_description":  (None, None),
+    "h1":                (None, None),
 }
 
-_AGREEMENT_LABELS = {
-    "full_agreement": ("🤝 Both agree", "#D1FAE5", "#065F46"),
-    "strengthened": ("⬆️ DeepSeek upgraded", "#DBEAFE", "#1E40AF"),
-    "disagreement": ("⚖️ Disputed", "#FEF3C7", "#92400E"),
-    "claude_only": ("🔵 Claude only", "#F1F5F9", "#475569"),
-    "gemini_only": ("⚡ DeepSeek only", "#EDE9FE", "#5B21B6"),
-    "partial": ("🔵 Partial review", "#F1F5F9", "#475569"),
+_PRIORITY_COLORS = {
+    "critical":  ("#FEE2E2", "#991B1B"),
+    "warning":   ("#FEF3C7", "#92400E"),
+    "quick_win": ("#D1FAE5", "#065F46"),
+    "ok":        ("#F1F5F9", "#475569"),
 }
+
+
+def _fischer_has(feature: str, current: dict) -> bool | None:
+    """Return True/False/None (None = unknown) for whether Fischer has a feature."""
+    mapping = _FEATURE_TO_CURRENT.get(feature)
+    if not mapping:
+        return None
+    key, pass_val = mapping
+    if not key:
+        return None
+    val = current.get(key)
+    if val is None:
+        return None
+    if pass_val is not None:
+        return val == pass_val
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return val > 0
+    return None
+
+
+def _bool_cell(value: bool | None, *, good: str = "✅ Yes", bad: str = "❌ No") -> str:
+    if value is True:
+        return f"<span style='color:#065F46;font-weight:600;'>{good}</span>"
+    if value is False:
+        return f"<span style='color:#991B1B;font-weight:600;'>{bad}</span>"
+    return "<span style='color:#94A3B8;'>—</span>"
 
 
 def render_competitor_gaps(project: ProjectConfig, page: PageData) -> None:
-    """Show what competitors have that this site lacks."""
+    """Show a Feature / Competitors / Fischer comparison table."""
     if not project.competitor_urls:
         return
 
-    st.markdown("### 🏁 Competitor Gaps")
+    n_comp = len(project.competitor_urls)
+    st.markdown("### 🏁 Competitor Comparison")
     st.caption(
-        f"Comparing **{project.business_name}** against "
-        f"{len(project.competitor_urls)} competitor site(s)."
+        f"**{html.escape(project.business_name)}** vs "
+        f"**{n_comp} competitor(s)**"
     )
 
     if not page.ai_complete:
-        st.info("Open this page to run AI analysis — competitor gaps appear here after analysis.")
+        st.info("Open this page to run AI analysis — the comparison table appears after analysis.")
         with st.expander("Configured competitors"):
             for url in project.competitor_urls:
                 st.markdown(f"- {url}")
@@ -57,55 +90,85 @@ def render_competitor_gaps(project: ProjectConfig, page: PageData) -> None:
 
     ai = page.ai_analysis or {}
     summary = ai.get("competitor_summary") or {}
-    gap_counts = summary.get("competitor_gap_counts") or {}
-    examples = summary.get("examples") or {}
-    current = summary.get("current_site") or {}
+    gap_counts: dict[str, int] = summary.get("competitor_gap_counts") or {}
+    examples: dict[str, list] = summary.get("examples") or {}
+    current: dict = summary.get("current_site") or {}
 
-    if not gap_counts:
+    if not gap_counts and not current:
         st.warning(
-            "No competitor advantages detected yet, or analysis used cached data from "
-            "before competitors were added. Switch to another page and back to refresh."
+            "No competitor data yet. This can happen with cached analysis from before "
+            "competitors were added — click **Force AI refresh** in the sidebar."
         )
         with st.expander("Configured competitors"):
             for url in project.competitor_urls:
                 st.markdown(f"- {url}")
         return
 
-    # Side-by-side: your site vs competitors
-    col_you, col_them = st.columns(2)
-    with col_you:
-        st.markdown("**Your site (Fischer)**")
-        _site_status_row("FAQ section", current.get("has_faq"))
-        _site_status_row("Review signals", current.get("has_reviews"))
-        _site_status_row("WhatsApp button", current.get("has_whatsapp"))
-        schema = current.get("schema_status", "na")
-        _site_status_row("Schema markup", schema == "pass", f"Status: {schema}")
-        st.markdown(
-            f"<div style='font-size:0.85rem;padding:4px 0;'>"
-            f"H2 headings: <strong>{current.get('h2_count', 0)}</strong></div>",
-            unsafe_allow_html=True,
+    # Build rows: union of known features (from gap_counts) + always-shown fields
+    all_features: list[str] = list({
+        *gap_counts.keys(),
+        "faq_section", "whatsapp", "reviews", "schema", "content_structure",
+    })
+    # Sort: most-competitors-have first, then alphabetical
+    all_features.sort(key=lambda f: (-gap_counts.get(f, 0), f))
+
+    rows_html = ""
+    for feature in all_features:
+        label = _FEATURE_LABELS.get(feature, feature.replace("_", " ").title())
+        count = gap_counts.get(feature, 0)
+        fischer_val = _fischer_has(feature, current)
+
+        # Competitors cell: "N / M competitors ✅" or "—"
+        if count > 0:
+            comp_cell = (
+                f"<span style='color:#065F46;font-weight:600;'>"
+                f"✅ {count} / {n_comp}</span>"
+            )
+            ex_list = examples.get(feature, [])
+            if ex_list:
+                comp_cell += (
+                    f"<br><span style='font-size:0.75rem;color:#64748B;'>"
+                    f"e.g. {html.escape(str(ex_list[0])[:60])}</span>"
+                )
+        else:
+            comp_cell = "<span style='color:#94A3B8;'>0 / " + str(n_comp) + "</span>"
+
+        # Fischer cell
+        if fischer_val is True:
+            fischer_cell = "<span style='color:#065F46;font-weight:600;'>✅ Yes</span>"
+            row_bg = "#FFFFFF"
+        elif fischer_val is False:
+            fischer_cell = "<span style='color:#991B1B;font-weight:600;'>❌ Missing</span>"
+            row_bg = "#FFF7F7" if count > 0 else "#FFFFFF"
+        else:
+            fischer_cell = "<span style='color:#94A3B8;'>—</span>"
+            row_bg = "#FFFFFF"
+
+        rows_html += (
+            f"<tr style='background:{row_bg};border-bottom:1px solid #E2E8F0;'>"
+            f"<td style='padding:10px 12px;font-size:0.84rem;font-weight:600;"
+            f"color:#1E293B;'>{html.escape(label)}</td>"
+            f"<td style='padding:10px 12px;font-size:0.84rem;'>{comp_cell}</td>"
+            f"<td style='padding:10px 12px;font-size:0.84rem;'>{fischer_cell}</td>"
+            f"</tr>"
         )
 
-    with col_them:
-        st.markdown("**What competitors have that you don't**")
-        for feature, count in sorted(gap_counts.items(), key=lambda x: -x[1]):
-            label = _FEATURE_LABELS.get(feature, feature.replace("_", " ").title())
-            ex_list = examples.get(feature, [])
-            example_html = ""
-            if ex_list:
-                example_html = (
-                    f"<br><span style='font-size:0.78rem;color:#64748B;'>"
-                    f"e.g. {html.escape(str(ex_list[0]))}</span>"
-                )
-            st.markdown(
-                f"<div style='background:#FEF2F2;border-left:3px solid #DC2626;"
-                f"padding:8px 12px;border-radius:4px;margin-bottom:6px;font-size:0.85rem;'>"
-                f"<strong>{html.escape(label)}</strong><br>"
-                f"{count} competitor(s) have this{example_html}</div>",
-                unsafe_allow_html=True,
-            )
+    table_html = (
+        "<div style='overflow-x:auto;margin-top:8px;'>"
+        "<table style='width:100%;border-collapse:collapse;background:#FFFFFF;"
+        "border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.06);'>"
+        "<thead><tr style='background:#1E293B;color:#F1F5F9;'>"
+        "<th style='padding:10px 12px;text-align:left;font-size:0.78rem;"
+        "font-weight:700;letter-spacing:0.04em;'>Feature</th>"
+        "<th style='padding:10px 12px;text-align:left;font-size:0.78rem;"
+        f"font-weight:700;letter-spacing:0.04em;'>Competitors ({n_comp})</th>"
+        f"<th style='padding:10px 12px;text-align:left;font-size:0.78rem;"
+        f"font-weight:700;letter-spacing:0.04em;'>{html.escape(project.business_name)}</th>"
+        f"</tr></thead><tbody>{rows_html}</tbody></table></div>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
 
-    # Raw competitor gap details from crawl
+    # Per-competitor raw detail (collapsed)
     raw_gaps = ai.get("competitor_gaps") or []
     if raw_gaps:
         with st.expander("Per-competitor details"):
@@ -114,164 +177,95 @@ def render_competitor_gaps(project: ProjectConfig, page: PageData) -> None:
                 features = comp.get("positive_features") or {}
                 if not features:
                     continue
-                st.markdown(f"**{domain}**")
+                st.markdown(f"**{html.escape(str(domain))}**")
                 for feat, detail in features.items():
-                    label = _FEATURE_LABELS.get(feat, feat.replace("_", " ").title())
-                    st.markdown(f"- {label}: {detail}")
+                    lbl = _FEATURE_LABELS.get(feat, feat.replace("_", " ").title())
+                    st.markdown(f"- {lbl}: {detail}")
 
 
 def render_ai_consensus_table(page: PageData) -> None:
-    """Show each Claude finding with DeepSeek's agree/disagree verdict."""
+    """Show confirmed AI findings (warnings + errors agreed by all active models)."""
     if not page.ai_complete:
         return
 
     ai = page.ai_analysis or {}
-    annotations = ai.get("annotations") or []
-    reviews = ai.get("gemini_reviews") or []
     rec_cards = ai.get("recommendation_cards") or []
-    reviewer_label = ai.get("reviewer_label") or "DeepSeek"
-    reviewer_active = ai.get("reviewer_active", False)
-    reviewer_attempted = bool(ai.get("reviewer_attempted", False))
-    reviewer_error = str(ai.get("reviewer_error", "") or "")
 
-    st.markdown(f"### 🤝 AI Consensus — Claude vs {reviewer_label}")
+    st.markdown("### 🤝 Confirmed AI Findings")
 
-    if not reviewer_active and not reviews:
-        from app.main import _reload_settings, _has_deepseek_key
+    # Filter to only actionable cards (critical / warning / quick_win)
+    actionable = [
+        c for c in rec_cards
+        if c.get("priority") in ("critical", "warning", "quick_win")
+    ]
 
-        deepseek_loaded = _has_deepseek_key(_reload_settings())
-        if deepseek_loaded:
-            if reviewer_attempted:
-                st.warning(
-                    f"{reviewer_label} was called but returned no structured review items for this page. "
-                    "Use **Force AI refresh** and check logs for reviewer output format."
-                )
-                if reviewer_error:
-                    st.caption(f"Reviewer error: {reviewer_error}")
-            else:
-                st.warning(
-                    f"{reviewer_label} is configured but review was not attempted for this page yet. "
-                    "This usually means cached Claude-only output. Click **Force AI refresh**."
-                )
-        else:
-            st.warning(
-                f"{reviewer_label} did not run for this page because no DeepSeek key was loaded. "
-                "Set `DEEPSEEK_API_KEY` (or `DeepSeek_API_KEY`) in `.env`, restart the app, "
-                "then re-open this page."
-            )
-        if annotations:
-            st.markdown(f"Claude found **{len(annotations)}** issue(s) without a second review.")
+    if not actionable:
+        st.info("No warnings or errors confirmed across all active AI models.")
         return
 
-    if not annotations and not reviews:
-        st.info("No AI findings to compare yet.")
-        return
+    n_reviewers = len([
+        1 for k in ("reviewer_active", "gemini_reviewer_active")
+        if ai.get(k)
+    ])
+    reviewer_label = ai.get("reviewer_label") or "AI reviewers"
+    st.caption(
+        f"The table below shows only findings confirmed by Claude"
+        + (f" and {reviewer_label}" if n_reviewers else "")
+        + ". Items disagreed upon are filtered out."
+    )
 
-    review_by_selector = {r.get("selector", ""): r for r in reviews}
-    card_by_selector = {c.get("selector", ""): c for c in rec_cards}
+    rows_html = ""
+    priority_order = {"critical": 0, "warning": 1, "quick_win": 2}
+    actionable.sort(key=lambda c: priority_order.get(c.get("priority", "warning"), 9))
 
-    rows_html = []
-    for ann in annotations:
-        selector = ann.get("selector", "")
-        label = ann.get("label") or ann.get("issue", "")[:60]
-        claude_priority = ann.get("priority", "warning")
-        review = review_by_selector.get(selector)
-        card = card_by_selector.get(selector)
-
-        if review:
-            verdict = review.get("gemini_verdict", "agree")
-            verdict_text, v_bg, v_fg = _VERDICT_LABELS.get(
-                verdict, ("—", "#F3F4F6", "#374151")
-            )
-            note = review.get("gemini_note", "")
-        else:
-            verdict_text, v_bg, v_fg = _AGREEMENT_LABELS["claude_only"]
-            note = "No review returned for this finding"
-
-        agreement = (card or {}).get("agreement_level", "claude_only")
-        agr_text, a_bg, a_fg = _AGREEMENT_LABELS.get(
-            agreement, _AGREEMENT_LABELS["claude_only"]
+    for card in actionable:
+        priority = card.get("priority", "warning")
+        label = html.escape(card.get("label") or card.get("problem", "")[:60])
+        problem = html.escape((card.get("problem") or "")[:120])
+        bg, fg = _PRIORITY_COLORS.get(priority, ("#F1F5F9", "#475569"))
+        icon = {"critical": "🔴", "warning": "🟡", "quick_win": "🟢"}.get(priority, "•")
+        priority_badge = (
+            f"<span style='background:{bg};color:{fg};padding:2px 8px;"
+            f"border-radius:9999px;font-size:0.72rem;font-weight:700;white-space:nowrap;'>"
+            f"{icon} {priority.replace('_', ' ').title()}</span>"
         )
 
-        comp_evidence = (review or {}).get("competitor_evidence") or {}
-        comp_cell = "<br>".join(
-            f"<span style='font-size:0.75rem;'>{html.escape(k)}: {html.escape(str(v))}</span>"
-            for k, v in comp_evidence.items()
+        comp_evidence = card.get("competitor_evidence") or {}
+        comp_html = "<br>".join(
+            f"<span style='font-size:0.74rem;'><strong>{html.escape(k)}:</strong> "
+            f"{html.escape(str(v)[:80])}</span>"
+            for k, v in list(comp_evidence.items())[:3]
         ) or "—"
 
-        rows_html.append(
-            f"<tr>"
-            f"<td style='padding:8px;font-size:0.82rem;'>{html.escape(label)}</td>"
-            f"<td style='padding:8px;text-align:center;'>"
-            f"<span style='background:#FEE2E2;color:#991B1B;padding:2px 8px;"
-            f"border-radius:9999px;font-size:0.75rem;font-weight:600;'>"
-            f"{html.escape(claude_priority)}</span></td>"
-            f"<td style='padding:8px;text-align:center;'>"
-            f"<span style='background:{v_bg};color:{v_fg};padding:2px 8px;"
-            f"border-radius:9999px;font-size:0.75rem;font-weight:600;'>"
-            f"{verdict_text}</span></td>"
-            f"<td style='padding:8px;text-align:center;'>"
-            f"<span style='background:{a_bg};color:{a_fg};padding:2px 8px;"
-            f"border-radius:9999px;font-size:0.75rem;font-weight:600;'>"
-            f"{agr_text}</span></td>"
-            f"<td style='padding:8px;font-size:0.78rem;color:#64748B;'>{html.escape(note)}</td>"
-            f"<td style='padding:8px;font-size:0.78rem;'>{comp_cell}</td>"
-            f"</tr>"
-        )
-
-    # DeepSeek-only findings (additional annotations merged into cards)
-    claude_selectors = {a.get("selector") for a in annotations}
-    for card in rec_cards:
-        if card.get("agreement_level") != "gemini_only":
-            continue
-        selector = card.get("selector", "")
-        if selector in claude_selectors:
-            continue
-        label = card.get("label") or card.get("problem", "")[:60]
-        agr_text, a_bg, a_fg = _AGREEMENT_LABELS["gemini_only"]
-        rows_html.append(
-            f"<tr>"
-            f"<td style='padding:8px;font-size:0.82rem;'>{html.escape(label)}</td>"
-            f"<td style='padding:8px;text-align:center;color:#94A3B8;'>—</td>"
-            f"<td style='padding:8px;text-align:center;'>"
-            f"<span style='background:#EDE9FE;color:#5B21B6;padding:2px 8px;"
-            f"border-radius:9999px;font-size:0.75rem;font-weight:600;'>➕ Adds finding</span></td>"
-            f"<td style='padding:8px;text-align:center;'>"
-            f"<span style='background:{a_bg};color:{a_fg};padding:2px 8px;"
-            f"border-radius:9999px;font-size:0.75rem;font-weight:600;'>"
-            f"{agr_text}</span></td>"
-            f"<td style='padding:8px;font-size:0.78rem;color:#64748B;'>"
-            f"{html.escape(card.get('gemini_note', ''))}</td>"
-            f"<td style='padding:8px;font-size:0.78rem;'>—</td>"
+        rows_html += (
+            f"<tr style='border-bottom:1px solid #E2E8F0;'>"
+            f"<td style='padding:10px 12px;font-weight:600;font-size:0.83rem;"
+            f"color:#1E293B;vertical-align:top;'>{label}</td>"
+            f"<td style='padding:10px 8px;text-align:center;vertical-align:top;'>"
+            f"{priority_badge}</td>"
+            f"<td style='padding:10px 12px;font-size:0.80rem;color:#475569;"
+            f"vertical-align:top;'>{problem}</td>"
+            f"<td style='padding:10px 12px;font-size:0.80rem;color:#64748B;"
+            f"vertical-align:top;'>{comp_html}</td>"
             f"</tr>"
         )
 
     table = (
-        "<table style='width:100%;border-collapse:collapse;margin-top:8px;'>"
-        "<thead><tr style='background:#F8FAFC;border-bottom:2px solid #E2E8F0;'>"
-        "<th style='padding:8px;text-align:left;font-size:0.78rem;'>Finding</th>"
-        "<th style='padding:8px;text-align:center;font-size:0.78rem;'>Claude</th>"
-        f"<th style='padding:8px;text-align:center;font-size:0.78rem;'>{html.escape(reviewer_label)}</th>"
-        "<th style='padding:8px;text-align:center;font-size:0.78rem;'>Consensus</th>"
-        "<th style='padding:8px;text-align:left;font-size:0.78rem;'>Reviewer note</th>"
-        "<th style='padding:8px;text-align:left;font-size:0.78rem;'>Competitor evidence</th>"
+        "<div style='overflow-x:auto;margin-top:8px;'>"
+        "<table style='width:100%;border-collapse:collapse;background:#FFFFFF;"
+        "border-radius:8px;overflow:hidden;'>"
+        "<thead><tr style='background:#1E293B;color:#F1F5F9;'>"
+        "<th style='padding:10px 12px;text-align:left;font-size:0.78rem;'>Finding</th>"
+        "<th style='padding:10px 8px;text-align:center;font-size:0.78rem;'>Severity</th>"
+        "<th style='padding:10px 12px;text-align:left;font-size:0.78rem;'>Problem</th>"
+        "<th style='padding:10px 12px;text-align:left;font-size:0.78rem;'>Competitor evidence</th>"
         "</tr></thead><tbody>"
-        + "".join(rows_html)
-        + "</tbody></table>"
+        + rows_html
+        + "</tbody></table></div>"
     )
     st.markdown(table, unsafe_allow_html=True)
     st.caption(
-        "Full recommended fixes are on the **💡 Recommendations** tab. "
-        "Expand each card there for suggested text and competitor quotes."
+        "Full fix suggestions are on the **💡 Recommendations** tab."
     )
 
 
-def _site_status_row(label: str, has_it: bool, extra: str = "") -> None:
-    icon = "✅" if has_it else "❌"
-    color = "#065F46" if has_it else "#991B1B"
-    detail = extra or ("Present" if has_it else "Missing")
-    st.markdown(
-        f"<div style='font-size:0.85rem;padding:4px 0;color:{color};'>"
-        f"{icon} <strong>{html.escape(label)}</strong> — {html.escape(detail)}</div>",
-        unsafe_allow_html=True,
-    )

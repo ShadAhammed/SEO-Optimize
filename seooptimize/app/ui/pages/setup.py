@@ -88,13 +88,13 @@ def render_setup_page() -> ProjectConfig | None:
             help="Leave blank to auto-derive from business category and city",
         )
 
-        st.markdown("### Competitor URLs (up to 5)")
+        st.markdown("### Competitor URLs (up to 8)")
         st.caption(
             "Enter competitor website URLs to enable gap analysis and competitor evidence."
         )
         competitor_cols = st.columns(2)
         competitor_urls: list[str] = []
-        for i in range(5):
+        for i in range(8):
             col = competitor_cols[i % 2]
             with col:
                 url = st.text_input(
